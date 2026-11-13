@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es-MX">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkout — NEGRA — Tienda ejemplo</title>
+<meta name="description" content="Ropa oscura, precio claro.">
+<link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="top"><a class="brand display" href="/" style="text-decoration:none">NEGRA — Tienda ejemplo</a>
+<nav><a href="/">Tienda</a><a href="/politicas.html">Envíos y devoluciones</a><a href="/carrito.html" data-contador-carrito>Carrito</a></nav></header>
+<main>
+<section class="hero"><h1 class="display">Checkout</h1></section>
+<div id="resumen"><p>Cargando resumen…</p></div>
+<form id="pedido">
+<label for="nombre">Nombre</label><input id="nombre" required>
+<label for="correo">Correo</label><input id="correo" type="email" required>
+<label for="entrega">Entrega</label>
+<select id="entrega"><option value="shipping">Envío a domicilio</option><option value="pickup">Pickup — Punto NEGRA — CDMX</option></select>
+<div id="direccion-bloque"><label for="direccion">Dirección de envío</label><input id="direccion" placeholder="Calle, número, colonia, CP, ciudad"></div>
+<p class="nota" style="margin:12px 0">Pago: adaptador stub en esta versión — no se realiza ningún cobro real. Al conectar la pasarela, aquí va su formulario.</p>
+<button class="boton" type="submit">Confirmar pedido</button>
+</form>
+<div id="resultado"></div>
+<script>
+document.getElementById("entrega").addEventListener("change", (e) => {
+  document.getElementById("direccion-bloque").style.display = e.target.value === "pickup" ? "none" : "block";
+});
+(async () => {
+  const items = leerCarrito();
+  const el = document.getElementById("resumen");
+  if (!items.length) { el.innerHTML = "<p>Tu carrito está vacío.</p>"; return; }
+  const c = await valorar();
+  el.innerHTML = "<p>Subtotal " + fmt(c.subtotal_cents) + " · Envío " + fmt(c.shipping_cents) + " · <strong>Total " + fmt(c.total_cents) + "</strong></p>";
+})();
+document.getElementById("pedido").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const entrega = document.getElementById("entrega").value;
+  const body = { items: leerCarrito(), customer: { name: document.getElementById("nombre").value, email: document.getElementById("correo").value }, fulfillment: { type: entrega, address: entrega === "shipping" ? document.getElementById("direccion").value : undefined }, payment_method: "stub" };
+  const r = await fetch("/api/orders", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  const res = document.getElementById("resultado");
+  if (!r.ok) { res.innerHTML = "<div class='aviso'><strong>No se pudo crear el pedido:</strong> " + (d.message || d.error) + "</div>"; return; }
+  localStorage.removeItem("carrito_v1"); actualizarContador();
+  res.innerHTML = "<div class='aviso'><strong>Pedido confirmado: " + d.order_number + "</strong><br>Total: " + fmt(d.total_cents) + "<br>Te llegará la confirmación por correo.</div>";
+});
+</script></main>
+<footer><div><div class="display">NEGRA — Tienda ejemplo</div><p class="nota">Ropa oscura, precio claro.</p></div>
+<div><p class="nota">Pickup: Punto NEGRA — CDMX — Calle Ejemplo 123, Col. Centro, Ciudad de México (Lun–Sáb 10:00–18:00).<br>Envío gratis a partir de $2,000.00 · Devolución gratuita 30 días · Reembolso en 3–5 días.</p></div></footer>
+<script src="/app.js"></script>
+</body></html>

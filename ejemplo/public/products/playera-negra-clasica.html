@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="es-MX">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playera Negra Clásica — NEGRA — Tienda ejemplo</title>
+<meta name="description" content="Ropa oscura, precio claro.">
+<link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="top"><a class="brand display" href="/" style="text-decoration:none">NEGRA — Tienda ejemplo</a>
+<nav><a href="/">Tienda</a><a href="/politicas.html">Envíos y devoluciones</a><a href="/carrito.html" data-contador-carrito>Carrito</a></nav></header>
+<main>
+<section class="hero"><h1 class="display">Playera Negra Clásica</h1></section>
+<p class="precio" style="font-size:28px"><span class="tachado">$1,299.00</span>$499.00</p>
+
+<p style="max-width:640px;margin:16px 0">Playera de algodón pesado, corte recto, negra. La base del catálogo: precio visible, sin letra chica.</p>
+
+<label for="variante">Variante</label>
+<select id="variante"><option value="undefined">S — 4 en stock</option><option value="undefined">M — 5 en stock</option><option value="undefined">L — 3 en stock</option></select>
+<label for="cantidad">Cantidad</label>
+<input id="cantidad" type="number" min="1" value="1">
+<p style="margin:16px 0"><button class="boton" id="agregar">Agregar al carrito</button> <a class="boton secundario" href="/carrito.html">Ver carrito</a></p>
+<p class="nota">Envío gratis a partir de $2,000.00 · Pickup en Punto NEGRA — CDMX · Devolución gratuita 30 días, reembolso en 3–5 días. La disponibilidad se verifica antes del cobro.</p>
+<script>
+document.getElementById("agregar").addEventListener("click", () => {
+  const v = document.getElementById("variante").value;
+  const q = Math.max(1, parseInt(document.getElementById("cantidad").value || "1", 10));
+  for (let i = 0; i < q; i++) agregar(v, 1);
+  document.getElementById("agregar").textContent = "Agregado ✓";
+});
+</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Playera Negra Clásica","description":"Playera de algodón pesado, corte recto, negra. La base del catálogo: precio visible, sin letra chica.","image":"https://ejemplo.local/images/playera-negra-clasica.svg","brand":{"@type":"Brand","name":"NEGRA"},"offers":{"@type":"AggregateOffer","priceCurrency":"MXN","lowPrice":"499.00","highPrice":"499.00","offerCount":3,"offers":[{"@type":"Offer","sku":"NG-TEE-BLK-S","price":"499.00","priceCurrency":"MXN","availability":"https://schema.org/InStock","itemCondition":"https://schema.org/NewCondition"},{"@type":"Offer","sku":"NG-TEE-BLK-M","price":"499.00","priceCurrency":"MXN","availability":"https://schema.org/InStock","itemCondition":"https://schema.org/NewCondition"},{"@type":"Offer","sku":"NG-TEE-BLK-L","price":"499.00","priceCurrency":"MXN","availability":"https://schema.org/InStock","itemCondition":"https://schema.org/NewCondition"}]}}</script></main>
+<footer><div><div class="display">NEGRA — Tienda ejemplo</div><p class="nota">Ropa oscura, precio claro.</p></div>
+<div><p class="nota">Pickup: Punto NEGRA — CDMX — Calle Ejemplo 123, Col. Centro, Ciudad de México (Lun–Sáb 10:00–18:00).<br>Envío gratis a partir de $2,000.00 · Devolución gratuita 30 días · Reembolso en 3–5 días.</p></div></footer>
+<script src="/app.js"></script>
+</body></html>

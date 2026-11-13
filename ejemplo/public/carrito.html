@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es-MX">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carrito — NEGRA — Tienda ejemplo</title>
+<meta name="description" content="Ropa oscura, precio claro.">
+<link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="top"><a class="brand display" href="/" style="text-decoration:none">NEGRA — Tienda ejemplo</a>
+<nav><a href="/">Tienda</a><a href="/politicas.html">Envíos y devoluciones</a><a href="/carrito.html" data-contador-carrito>Carrito</a></nav></header>
+<main>
+<section class="hero"><h1 class="display">Tu carrito</h1></section>
+<div id="barra" class="barra-envio"></div>
+<div id="carrito"><p>Cargando…</p></div>
+<p style="margin:16px 0"><a class="boton" href="/checkout.html">Ir al checkout</a> <a class="boton secundario" href="/">Seguir comprando</a></p>
+<script>
+(async () => {
+  const el = document.getElementById("carrito"), barra = document.getElementById("barra");
+  const items = leerCarrito();
+  if (!items.length) { el.innerHTML = "<p>Tu carrito está vacío.</p>"; barra.innerHTML = ""; return; }
+  try {
+    const c = await valorar();
+    const pct = Math.min(100, Math.round(c.subtotal_cents / c.free_shipping_threshold_cents * 100));
+    barra.innerHTML = c.missing_for_free_shipping_cents > 0
+      ? "<strong>Te faltan " + fmt(c.missing_for_free_shipping_cents) + " para envío gratis.</strong><div class='progreso'><i style='width:" + pct + "%'></i></div>"
+      : "<strong>¡Tienes envío gratis!</strong><div class='progreso'><i style='width:100%'></i></div>";
+    el.innerHTML = "<table><tr><th>Producto</th><th>Cant.</th><th>Precio</th><th>Total</th><th></th></tr>" +
+      c.lines.map((l) => "<tr><td>" + l.product_title + " — " + l.variant_title + (l.promo_applied ? " <span class='etiqueta'>promo</span>" : "") + "</td><td>" + l.qty + "</td><td>" + fmt(l.unit_cents) + "</td><td>" + fmt(l.line_total_cents) + "</td><td><button data-quitar='" + l.variant_id + "'>Quitar</button></td></tr>").join("") +
+      "</table><p>Subtotal: <strong>" + fmt(c.subtotal_cents) + "</strong></p><p>Envío: <strong>" + fmt(c.shipping_cents) + "</strong></p><p>Total: <strong>" + fmt(c.total_cents) + "</strong></p>";
+  } catch (e) { el.innerHTML = "<p>No se pudo cargar el carrito: " + e.message + "</p>"; }
+})();
+</script></main>
+<footer><div><div class="display">NEGRA — Tienda ejemplo</div><p class="nota">Ropa oscura, precio claro.</p></div>
+<div><p class="nota">Pickup: Punto NEGRA — CDMX — Calle Ejemplo 123, Col. Centro, Ciudad de México (Lun–Sáb 10:00–18:00).<br>Envío gratis a partir de $2,000.00 · Devolución gratuita 30 días · Reembolso en 3–5 días.</p></div></footer>
+<script src="/app.js"></script>
+</body></html>

@@ -1,0 +1,61 @@
+{
+  "ucp": {
+    "version": "2026-08-25",
+    "supported_versions": [
+      "2026-08-25",
+      "2026-04-08",
+      "2026-01-23"
+    ]
+  },
+  "store": {
+    "name": "NEGRA — Tienda ejemplo",
+    "domain": "ejemplo.local"
+  },
+  "services": {
+    "dev.ucp.shopping": {
+      "transport": {
+        "mcp": {
+          "endpoint": "https://ejemplo.local/api/ucp/mcp"
+        },
+        "embedded": {
+          "endpoint": "https://ejemplo.local/api/ucp/mcp"
+        }
+      },
+      "capabilities": [
+        "checkout",
+        "cart",
+        "order",
+        "catalog.search",
+        "catalog.lookup",
+        "discount",
+        "fulfillment",
+        "buyer_consent"
+      ],
+      "fulfillment": {
+        "method_combinations": [
+          [
+            "shipping"
+          ],
+          [
+            "pickup"
+          ]
+        ]
+      }
+    },
+    "dev.ucp.common": {
+      "transport": {
+        "mcp": {
+          "endpoint": "https://ejemplo.local/api/ucp/mcp"
+        }
+      },
+      "capabilities": [
+        "common.ask"
+      ]
+    }
+  },
+  "shopping": {
+    "permalink": {
+      "endpoint": "https://ejemplo.local/buy"
+    }
+  }
+}
