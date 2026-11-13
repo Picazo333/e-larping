@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://ejemplo.local/</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/politicas.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/carrito.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/products/playera-negra-clasica.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/products/pack-3-playeras.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/products/hoodie-grunge.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/products/gorra-bordada.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/products/tote-bolsa.html</loc><changefreq>weekly</changefreq></url>
+  <url><loc>https://ejemplo.local/agents.md</loc><changefreq>weekly</changefreq></url>
+</urlset>

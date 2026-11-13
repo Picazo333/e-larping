@@ -1,0 +1,26 @@
+# NEGRA — Tienda ejemplo — robots.txt generado por el pipeline e-larping (Fase 3).
+# Abierto a crawlers de IA: el contenido que cita vive en este dominio.
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /checkout
+Disallow: /carrito.html
+
+# Crawlers de IA (permitidos explícitamente)
+User-agent: GPTBot
+Allow: /
+User-agent: ClaudeBot
+Allow: /
+User-agent: PerplexityBot
+Allow: /
+User-agent: Google-Extended
+Allow: /
+User-agent: CCBot
+Allow: /
+
+# Agent instructions
+# Agent instructions: https://ejemplo.local/agents.md
+# UCP discovery: https://ejemplo.local/.well-known/ucp
+# UCP/MCP endpoint: https://ejemplo.local/api/ucp/mcp
+
+Sitemap: https://ejemplo.local/sitemap.xml

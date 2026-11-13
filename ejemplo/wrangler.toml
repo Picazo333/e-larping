@@ -1,0 +1,24 @@
+# wrangler.toml — NEGRA — Tienda ejemplo
+# Despliegue: Cloudflare Workers + D1 + Static Assets.
+# 1) npx wrangler login
+# 2) npx wrangler d1 create negra-ejemplo-db   -> copia el database_id aquí abajo
+# 3) npx wrangler d1 migrations apply negra-ejemplo-db --local
+#    npx wrangler d1 migrations apply negra-ejemplo-db --remote
+# 4) npx wrangler deploy
+# Sin secretos en este archivo. Las claves de pasarela/correo van con:
+#    wrangler secret put EMAIL_API_KEY   /   wrangler secret put PAYMENT_API_KEY
+name = "negra-ejemplo"
+main = "src/worker.js"
+compatibility_date = "2026-11-13"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "negra-ejemplo-db"
+database_id = "REEMPLAZAR-CON-EL-ID-REAL-DE-D1"
+
+[vars]
+STORE_SLUG = "negra-ejemplo"

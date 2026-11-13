@@ -1,0 +1,503 @@
+/**
+ * Worker de la tienda generada — Cloudflare Workers + D1 + Static Assets.
+ *
+ * Generado por pipeline/generate.js a partir de un JSON de configuración.
+ * NO contiene secretos ni credenciales. El pago es un ADAPTADOR STUB:
+ * autoriza de mentira y nunca cobra; el punto exacto donde conectar una
+ * pasarela real está marcado con `PASARELA REAL:`.
+ *
+ * La configuración de la tienda (catálogo semilla, textos, umbrales) se
+ * incrusta en tiempo de generación en `CONFIG` (ver `/*__CONFIG_JSON__*\/`).
+ * En ejecución, la fuente de verdad es D1 (tablas creadas por
+ * migrations/0001_init.sql y sembradas por seed.sql).
+ *
+ * Endpoints:
+ *   GET  /api/health
+ *   GET  /api/products | GET /api/products/:handle
+ *   GET  /products.json | GET /products/:handle.js   (forma Shopify)
+ *   POST /api/cart | GET /api/cart/:id
+ *   POST /api/orders | GET /api/orders/:id
+ *   POST /api/webhooks/payment                        (entrante, stub)
+ *   POST /api/ucp/mcp                                (JSON-RPC, tools/list + tools/call)
+ *   GET  /.well-known/ucp | GET /agents.md | GET /robots.txt | GET /sitemap.xml
+ *   GET  /buy -> redirige a /carrito.html
+ *   resto -> Static Assets (env.ASSETS) o 404 si no hay binding.
+ */
+
+const CONFIG = /*__CONFIG_JSON__*/ null;
+
+const money = (cents) =>
+  new Intl.NumberFormat("es-MX", { style: "currency", currency: CONFIG.store.currency || "MXN" }).format(cents / 100);
+
+const nowIso = () => new Date().toISOString();
+const genId = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+/* ------------------------------------------------------------------ */
+/* Precios: base -> escalera por volumen -> promo por producto.        */
+/* compare_at_price es solo visual (tachado); nunca entra al cálculo. */
+/* ------------------------------------------------------------------ */
+function promoActiva(p, at = new Date()) {
+  if (!p.promo_type || !p.promo_value) return false;
+  if (p.promo_starts_at && at < new Date(p.promo_starts_at)) return false;
+  if (p.promo_ends_at && at > new Date(p.promo_ends_at)) return false;
+  return true;
+}
+
+function precioUnitario(p, qty) {
+  let cents = p.price_cents;
+  let tier = null;
+  try {
+    const tiers = JSON.parse(p.volume_tiers_json || "[]");
+    for (const t of tiers) if (qty >= t.min_qty && (!tier || t.min_qty > tier.min_qty)) tier = t;
+  } catch { /* tiers inválidos = sin escalera */ }
+  if (tier) cents = Math.round(cents * (100 - tier.discount_percent) / 100);
+  if (promoActiva(p)) {
+    if (p.promo_type === "percent") cents = Math.round(cents * (100 - p.promo_value) / 100);
+    if (p.promo_type === "fixed") cents = Math.max(0, cents - p.promo_value);
+  }
+  return { unit_cents: cents, volume_tier: tier, promo_applied: promoActiva(p) };
+}
+
+function rowProducto(r) {
+  return {
+    id: r.id, handle: r.handle, title: r.title, description: r.description,
+    vendor: r.vendor, product_type: r.product_type, tags: r.tags ? r.tags.split(",").map((s) => s.trim()).filter(Boolean) : [],
+    price_cents: r.price_cents, compare_at_price_cents: r.compare_at_price_cents,
+    image: r.image, stock: r.stock, low_stock_threshold: r.low_stock_threshold,
+    promo_type: r.promo_type, promo_value: r.promo_value,
+    promo_label: r.promo_label, promo_starts_at: r.promo_starts_at, promo_ends_at: r.promo_ends_at,
+    volume_tiers: JSON.parse(r.volume_tiers_json || "[]"),
+    available: r.stock > 0,
+  };
+}
+
+async function listarProductos(db) {
+  const { results } = await db.prepare(
+    "SELECT * FROM products WHERE active = 1 ORDER BY sort_order ASC, id ASC"
+  ).all();
+  return results.map(rowProducto);
+}
+
+async function productoPorHandle(db, handle) {
+  const row = await db.prepare("SELECT * FROM products WHERE handle = ? AND active = 1").bind(handle).first();
+  if (!row) return null;
+  const p = rowProducto(row);
+  const { results: variants } = await db.prepare(
+    "SELECT * FROM variants WHERE product_id = ? ORDER BY id ASC"
+  ).bind(row.id).all();
+  p.variants = variants.map((v) => ({
+    id: v.id, sku: v.sku, title: v.title,
+    price_cents: v.price_cents_override ?? p.price_cents, stock: v.stock, available: v.stock > 0,
+  }));
+  return p;
+}
+
+async function variantePorId(db, id) {
+  const v = await db.prepare(
+    "SELECT v.*, p.handle AS product_handle, p.title AS product_title, p.price_cents AS product_price, " +
+    "p.compare_at_price_cents, p.promo_type, p.promo_value, p.promo_label, p.promo_starts_at, " +
+    "p.promo_ends_at, p.volume_tiers_json FROM variants v JOIN products p ON p.id = v.product_id WHERE v.id = ?"
+  ).bind(id).first();
+  if (!v) return null;
+  const p = {
+    price_cents: v.price_cents_override ?? v.product_price,
+    compare_at_price_cents: v.compare_at_price_cents, promo_type: v.promo_type,
+    promo_value: v.promo_value, promo_starts_at: v.promo_starts_at, promo_ends_at: v.promo_ends_at,
+    volume_tiers_json: v.volume_tiers_json,
+  };
+  const calc = precioUnitario(p, 1);
+  return {
+    id: v.id, sku: v.sku, title: v.title, product_id: v.product_id,
+    product_handle: v.product_handle, product_title: v.product_title,
+    price_cents: calc.unit_cents, base_price_cents: p.price_cents,
+    compare_at_price_cents: v.compare_at_price_cents, stock: v.stock,
+  };
+}
+
+/** Valora un carrito sin persistir nada: misma lógica que el pedido. */
+async function valorarCarrito(db, items) {
+  const lines = [];
+  let subtotal = 0;
+  for (const it of items) {
+    const qty = Math.max(1, Math.floor(it.qty || 0));
+    const v = await variantePorId(db, it.variant_id);
+    if (!v) throw Object.assign(new Error(`Variante no encontrada: ${it.variant_id}`), { status: 400 });
+    const p = {
+      price_cents: v.base_price_cents, compare_at_price_cents: v.compare_at_price_cents,
+      promo_type: null, promo_value: null, promo_starts_at: null, promo_ends_at: null,
+      volume_tiers_json: "[]",
+    };
+    // Releer promo/escalera del producto (variantePorId ya trae el precio base;
+    // la escalera y la promo viven en el producto y se aplican por cantidad).
+    const prod = await db.prepare("SELECT * FROM products WHERE id = ?").bind(v.product_id).first();
+    p.promo_type = prod.promo_type; p.promo_value = prod.promo_value;
+    p.promo_starts_at = prod.promo_starts_at; p.promo_ends_at = prod.promo_ends_at;
+    p.volume_tiers_json = prod.volume_tiers_json;
+    const calc = precioUnitario(p, qty);
+    const lineTotal = calc.unit_cents * qty;
+    subtotal += lineTotal;
+    lines.push({
+      variant_id: v.id, sku: v.sku, product_handle: v.product_handle,
+      product_title: v.product_title, variant_title: v.title, qty,
+      unit_cents: calc.unit_cents, base_unit_cents: v.base_price_cents,
+      compare_at_price_cents: v.compare_at_price_cents,
+      volume_tier: calc.volume_tier, promo_applied: calc.promo_applied,
+      line_total_cents: lineTotal, stock: v.stock, available: v.stock >= qty,
+    });
+  }
+  const ship = CONFIG.shipping;
+  const freeThreshold = ship.free_threshold_cents;
+  const shippingCents = subtotal >= freeThreshold ? 0 : ship.flat_cents;
+  return {
+    lines, subtotal_cents: subtotal, shipping_cents: shippingCents,
+    free_shipping_threshold_cents: freeThreshold,
+    missing_for_free_shipping_cents: Math.max(0, freeThreshold - subtotal),
+    total_cents: subtotal + shippingCents,
+  };
+}
+
+const json = (data, status = 200) =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+const text = (body, status = 200, type = "text/plain; charset=utf-8") =>
+  new Response(body, { status, headers: { "content-type": type } });
+const err = (status, code, message) => json({ error: code, message }, status);
+
+/* ------------------------------------------------------------------ */
+/* Correo (auto-respuesta) — adaptador sin secretos.                   */
+/* Por defecto NO envía nada a un proveedor: registra el mensaje en   */
+/* la tabla email_outbox (cola/log) con status "queued".               */
+/* PUNTO EXACTO DE CONEXIÓN: en sendEmail(), donde dice               */
+/* `PROVEEDOR DE CORREO:` — ahí va la llamada al proveedor elegido    */
+/* (Resend, MailChannels, SendGrid...), con su clave guardada como    */
+/* secreto de Cloudflare (`wrangler secret put`), NUNCA en el código. */
+/* ------------------------------------------------------------------ */
+async function sendEmail(db, { to, subject, body_text, kind }) {
+  // PROVEEDOR DE CORREO: sustituir este INSERT por la llamada al proveedor.
+  // Ejemplo (no activo): await fetch("https://api.resend.com/emails", { method: "POST",
+  //   headers: { Authorization: `Bearer ${env.EMAIL_API_KEY}`, "content-type": "application/json" },
+  //   body: JSON.stringify({ from: CONFIG.email.from, to, subject, text: body_text }) });
+  // y marcar status "sent" en vez de "queued".
+  await db.prepare(
+    "INSERT INTO email_outbox (id, kind, recipient, subject, body_text, status, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?)"
+  ).bind(genId("mail"), kind, to, subject, body_text, nowIso()).run();
+  return { queued: true };
+}
+
+/* ------------------------------------------------------------------ */
+/* Webhooks salientes (order.created, inventory.low, payment.*).       */
+/* Se registran SIEMPRE en webhook_deliveries. Si la config trae      */
+/* webhooks.url, se intenta el POST; si no, queda en "no_endpoint"    */
+/* (registrado, no perdido). Sin reintentos automáticos en v1: el     */
+/* reintento es manual releyendo la tabla.                             */
+/* ------------------------------------------------------------------ */
+async function emitWebhook(env, event, payload) {
+  const id = genId("wh");
+  const url = (CONFIG.webhooks && CONFIG.webhooks.url) || null;
+  let status = "no_endpoint";
+  let httpStatus = null;
+  if (url) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-webhook-event": event },
+        body: JSON.stringify({ event, sent_at: nowIso(), data: payload }),
+      });
+      httpStatus = res.status;
+      status = res.ok ? "delivered" : "failed";
+    } catch (e) {
+      status = "failed";
+    }
+  }
+  await env.DB.prepare(
+    "INSERT INTO webhook_deliveries (id, event, payload_json, target_url, status, http_status, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)"
+  ).bind(id, event, JSON.stringify(payload), url, status, httpStatus, nowIso()).run();
+  return { id, status };
+}
+
+/* ------------------------------------------------------------------ */
+/* Pago — ADAPTADOR STUB. Nunca cobra, nunca toca dinero real.         */
+/* PASARELA REAL: sustituir authorizePayment() por la llamada a la    */
+/* pasarela (Stripe, Mercado Pago, Conekta...) con su clave como       */
+/* secreto (`wrangler secret put`), y guardar el id de cobro real     */
+/* en orders.payment_reference. El orden del flujo NO cambia:          */
+/* 1) verificar disponibilidad, 2) autorizar cobro, 3) descontar     */
+/* stock y crear el pedido. Nunca descontar antes de autorizar.       */
+/* ------------------------------------------------------------------ */
+async function authorizePayment(orderDraft) {
+  // STUB: autoriza siempre en modo prueba. En producción con pasarela
+  // real, aquí se devuelve { ok:false, reason } si el cobro falla y el
+  // pedido NO se crea ni se descuenta stock.
+  return {
+    ok: true, mode: "stub",
+    authorization_id: `stub_auth_${orderDraft.id}`,
+    note: "STUB — no se realizó ningún cobro real. Conectar pasarela en authorizePayment().",
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Pedido: disponibilidad ANTES del cobro; stock descontado al crear  */
+/* el pedido (después de autorizar). Todo en un solo batch de D1.     */
+/* ------------------------------------------------------------------ */
+async function crearPedido(env, body) {
+  const db = env.DB;
+  const items = Array.isArray(body.items) ? body.items : [];
+  if (!items.length) return err(400, "empty_cart", "El pedido no tiene artículos.");
+  const customer = body.customer || {};
+  if (!customer.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email))
+    return err(400, "invalid_customer", "Se requiere un correo válido del comprador.");
+  const fulfillmentType = body.fulfillment?.type === "pickup" ? "pickup" : "shipping";
+  if (fulfillmentType === "shipping" && !body.fulfillment?.address)
+    return err(400, "missing_address", "El envío requiere una dirección.");
+
+  // 1) Disponibilidad ANTES del cobro (lección §8 síntesis: verificar antes de cobrar).
+  const priced = await valorarCarrito(db, items);
+  const sinStock = priced.lines.filter((l) => !l.available);
+  if (sinStock.length) {
+    return json({ error: "out_of_stock", message: "Sin stock suficiente antes del cobro.", items: sinStock.map((l) => ({ variant_id: l.variant_id, sku: l.sku, requested: l.qty, stock: l.stock })) }, 409);
+  }
+  const orderId = genId("ord");
+  const orderNumber = `EL-${String(Date.now()).slice(-8)}`;
+
+  // 2) Autorizar cobro (stub por defecto).
+  const auth = await authorizePayment({ id: orderId, total_cents: priced.total_cents, customer });
+  if (!auth.ok) return err(402, "payment_failed", auth.reason || "El cobro no fue autorizado.");
+
+  // 3) Descontar stock + crear pedido + movimientos, en un batch.
+  const stmts = [];
+  const shippingCents = fulfillmentType === "pickup" ? 0 : priced.shipping_cents;
+  const totalCents = priced.subtotal_cents + shippingCents;
+  stmts.push(db.prepare(
+    "INSERT INTO orders (id, order_number, customer_name, customer_email, fulfillment_type, pickup_point, shipping_address, subtotal_cents, shipping_cents, total_cents, currency, payment_status, payment_reference, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'authorized_stub', ?, 'confirmed', ?)"
+  ).bind(orderId, orderNumber, customer.name || "", customer.email, fulfillmentType,
+    fulfillmentType === "pickup" ? CONFIG.shipping.pickup.name : null,
+    fulfillmentType === "shipping" ? JSON.stringify(body.fulfillment.address) : null,
+    priced.subtotal_cents, shippingCents, totalCents, CONFIG.store.currency || "MXN",
+    auth.authorization_id, nowIso()));
+  for (const l of priced.lines) {
+    stmts.push(db.prepare(
+      "INSERT INTO order_items (order_id, variant_id, sku, product_handle, product_title, variant_title, qty, unit_cents, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(orderId, l.variant_id, l.sku, l.product_handle, l.product_title, l.variant_title, l.qty, l.unit_cents, l.line_total_cents));
+    stmts.push(db.prepare("UPDATE variants SET stock = stock - ? WHERE id = ?").bind(l.qty, l.variant_id));
+    stmts.push(db.prepare(
+      "INSERT INTO inventory_movements (variant_id, delta, reason, order_id, created_at) VALUES (?, ?, 'order', ?, ?)"
+    ).bind(l.variant_id, -l.qty, orderId, nowIso()));
+  }
+  await db.batch(stmts);
+
+  // 4) Webhooks + correo (fuera del batch; si fallan, el pedido ya existe).
+  const orderPayload = { order_id: orderId, order_number: orderNumber, total_cents: totalCents, customer_email: customer.email, fulfillment_type: fulfillmentType };
+  await emitWebhook(env, "order.created", orderPayload);
+  await emitWebhook(env, "payment.authorized", { ...orderPayload, authorization_id: auth.authorization_id, mode: auth.mode });
+
+  const lowStock = [];
+  for (const l of priced.lines) {
+    const v = await db.prepare("SELECT stock FROM variants WHERE id = ?").bind(l.variant_id).first();
+    const prod = await db.prepare("SELECT low_stock_threshold FROM products WHERE id = (SELECT product_id FROM variants WHERE id = ?)").bind(l.variant_id).first();
+    const threshold = prod?.low_stock_threshold ?? CONFIG.store.low_stock_threshold ?? 3;
+    if (v && v.stock <= threshold) {
+      lowStock.push({ variant_id: l.variant_id, sku: l.sku, stock: v.stock, threshold });
+      await emitWebhook(env, "inventory.low", { variant_id: l.variant_id, sku: l.sku, product_handle: l.product_handle, stock: v.stock, threshold });
+    }
+  }
+
+  const pickup = CONFIG.shipping.pickup;
+  const fulfillmentText = fulfillmentType === "pickup"
+    ? `Recoge tu pedido en ${pickup.name} — ${pickup.address} (${pickup.hours}). Te avisaremos cuando esté listo.`
+    : `Envío a la dirección registrada. Envío gratis a partir de ${money(CONFIG.shipping.free_threshold_cents)}.`;
+  await sendEmail(db, {
+    to: customer.email, kind: "order_confirmation",
+    subject: `Tu pedido ${orderNumber} está confirmado — ${CONFIG.store.name}`,
+    body_text: `Hola${customer.name ? " " + customer.name : ""},\n\nTu pedido ${orderNumber} por ${money(totalCents)} está confirmado.\n${fulfillmentText}\n\nDevoluciones: gratuitas dentro de ${CONFIG.returns.days} días; reembolso en ${CONFIG.returns.refund_days}. Ver política completa en /politicas.html\n\nGracias por comprar en ${CONFIG.store.name}.`,
+  });
+  if (lowStock.length && CONFIG.store.owner_email) {
+    await sendEmail(db, {
+      to: CONFIG.store.owner_email, kind: "inventory_low",
+      subject: `Stock bajo — ${lowStock.length} variante(s) en ${CONFIG.store.name}`,
+      body_text: `Stock bajo tras el pedido ${orderNumber}:\n${lowStock.map((s) => `- ${s.sku}: ${s.stock} restantes (umbral ${s.threshold})`).join("\n")}`,
+    });
+  }
+  return json({ order_id: orderId, order_number: orderNumber, total_cents: totalCents, payment: auth, low_stock: lowStock }, 201);
+}
+
+/* ------------------------------------------------------------------ */
+/* MCP (UCP) — JSON-RPC 2.0 mínimo, modelado en la plantilla Shopify  */
+/* observada en la Fase 1/2 (servicios dev.ucp.shopping / common,     */
+/* capacidades cart, checkout, order, catalog, discount, fulfillment).*/
+/* payment_handlers: NO se declara en v1 (síntesis §10.2). No hay      */
+/* pasarela real todavía: el agente descubre el catálogo y arma el    */
+/* carrito; el cobro lo hace el checkout de la tienda. Un objeto      */
+/* vacío sería la plantilla sin rellenar, no una decisión. Al         */
+/* conectar una pasarela, declarar sus handlers reales en generate.js.*/
+/* ------------------------------------------------------------------ */
+const MCP_TOOLS = [
+  { name: "catalog.search", description: "Buscar productos del catálogo por texto.", inputSchema: { type: "object", properties: { query: { type: "string" } } } },
+  { name: "catalog.lookup", description: "Ficha de un producto por handle, con precio y stock.", inputSchema: { type: "object", properties: { handle: { type: "string" } } } },
+  { name: "cart.create", description: "Crear un carrito valorado con precios por volumen y promos.", inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object", properties: { variant_id: { type: "number" }, qty: { type: "number" } } } } } } },
+  { name: "order.lookup", description: "Consultar un pedido por id.", inputSchema: { type: "object", properties: { order_id: { type: "string" } } } },
+];
+
+async function handleMcp(env, body) {
+  const db = env.DB;
+  const result = (id, r) => json({ jsonrpc: "2.0", id: id ?? null, result: r });
+  const error = (id, code, message) => json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
+  if (body.method === "initialize") return result(body.id, { protocolVersion: "2025-06-18", serverInfo: { name: CONFIG.store.slug + "-ucp", version: "1.0.0" }, capabilities: { tools: {} } });
+  if (body.method === "tools/list") return result(body.id, { tools: MCP_TOOLS });
+  if (body.method === "tools/call") {
+    const name = body.params?.name;
+    const args = body.params?.arguments || {};
+    try {
+      if (name === "catalog.search") {
+        const q = String(args.query || "").toLowerCase();
+        const all = await listarProductos(db);
+        const hits = all.filter((p) => !q || (p.title + " " + p.description + " " + p.tags.join(" ")).toLowerCase().includes(q));
+        return result(body.id, { content: [{ type: "text", text: JSON.stringify(hits) }] });
+      }
+      if (name === "catalog.lookup") {
+        const p = await productoPorHandle(db, args.handle);
+        if (!p) return error(body.id, -32001, "Producto no encontrado.");
+        return result(body.id, { content: [{ type: "text", text: JSON.stringify(p) }] });
+      }
+      if (name === "cart.create") {
+        const priced = await valorarCarrito(db, args.items || []);
+        const cartId = genId("cart");
+        await db.prepare("INSERT INTO carts (id, items_json, created_at) VALUES (?, ?, ?)")
+          .bind(cartId, JSON.stringify(args.items || []), nowIso()).run();
+        return result(body.id, { content: [{ type: "text", text: JSON.stringify({ cart_id: cartId, ...priced }) }] });
+      }
+      if (name === "order.lookup") {
+        const o = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(args.order_id).first();
+        if (!o) return error(body.id, -32001, "Pedido no encontrado.");
+        return result(body.id, { content: [{ type: "text", text: JSON.stringify(o) }] });
+      }
+      return error(body.id, -32601, `Herramienta desconocida: ${name}`);
+    } catch (e) {
+      return error(body.id, -32000, e.message || "Error interno.");
+    }
+  }
+  if (body.method === "notifications/initialized" || body.method?.startsWith("notifications/")) return new Response(null, { status: 202 });
+  return error(body.id, -32601, `Método desconocido: ${body.method}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Router                                                              */
+/* ------------------------------------------------------------------ */
+function shopifyProductsJson(products) {
+  return {
+    products: products.map((p) => ({
+      id: p.id, title: p.title, handle: p.handle, body_html: p.description,
+      vendor: p.vendor, product_type: p.product_type, tags: p.tags,
+      variants: (p.variants || []).map((v) => ({
+        id: v.id, title: v.title, sku: v.sku, price: (v.price_cents / 100).toFixed(2),
+        compare_at_price: v.compare_at_price_cents ? (v.compare_at_price_cents / 100).toFixed(2) : null,
+        available: v.available,
+      })),
+      images: p.image ? [{ src: p.image }] : [],
+    })),
+  };
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const db = env.DB;
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const runSoon = (p) => (ctx && ctx.waitUntil ? ctx.waitUntil(p) : p);
+    try {
+      if (request.method === "GET" && path === "/api/health") {
+        const row = await db.prepare("SELECT COUNT(*) AS n FROM products").first();
+        return json({ ok: true, store: CONFIG.store.slug, products: row?.n ?? 0 });
+      }
+
+      if (request.method === "GET" && path === "/api/products") {
+        const products = await listarProductos(db);
+        for (const p of products) {
+          const full = await productoPorHandle(db, p.handle);
+          p.variants = full.variants;
+          p.unit_price_cents_qty1 = precioUnitario(p, 1).unit_cents;
+        }
+        return json({ products });
+      }
+      const mProd = path.match(/^\/api\/products\/([a-z0-9-]+)$/);
+      if (request.method === "GET" && mProd) {
+        const p = await productoPorHandle(db, mProd[1]);
+        if (!p) return err(404, "not_found", "Producto no encontrado.");
+        return json({ product: p });
+      }
+
+      if (request.method === "GET" && path === "/products.json") {
+        const products = await listarProductos(db);
+        for (const p of products) p.variants = (await productoPorHandle(db, p.handle)).variants;
+        return json(shopifyProductsJson(products));
+      }
+      const mJs = path.match(/^\/products\/([a-z0-9-]+)\.js$/);
+      if (request.method === "GET" && mJs) {
+        const p = await productoPorHandle(db, mJs[1]);
+        if (!p) return err(404, "not_found", "Producto no encontrado.");
+        return json({ ...p, price: (p.price_cents / 100).toFixed(2) });
+      }
+
+      if (request.method === "POST" && path === "/api/cart") {
+        const body = await request.json().catch(() => ({}));
+        const priced = await valorarCarrito(db, body.items || []);
+        const cartId = genId("cart");
+        await db.prepare("INSERT INTO carts (id, items_json, created_at) VALUES (?, ?, ?)")
+          .bind(cartId, JSON.stringify(body.items || []), nowIso()).run();
+        return json({ cart_id: cartId, ...priced }, 201);
+      }
+      const mCart = path.match(/^\/api\/cart\/([A-Za-z0-9_]+)$/);
+      if (request.method === "GET" && mCart) {
+        const c = await db.prepare("SELECT * FROM carts WHERE id = ?").bind(mCart[1]).first();
+        if (!c) return err(404, "not_found", "Carrito no encontrado.");
+        const priced = await valorarCarrito(db, JSON.parse(c.items_json || "[]"));
+        return json({ cart_id: c.id, ...priced });
+      }
+
+      if (request.method === "POST" && path === "/api/orders") {
+        const body = await request.json().catch(() => ({}));
+        return await crearPedido(env, body);
+      }
+      const mOrd = path.match(/^\/api\/orders\/([A-Za-z0-9_]+)$/);
+      if (request.method === "GET" && mOrd) {
+        const o = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(mOrd[1]).first();
+        if (!o) return err(404, "not_found", "Pedido no encontrado.");
+        const { results: items } = await db.prepare("SELECT * FROM order_items WHERE order_id = ?").bind(o.id).all();
+        return json({ order: o, items });
+      }
+
+      // Webhook ENTRANTE de pago (stub): la pasarela real avisaría aquí.
+      // Sin secreto compartido en v1: valida forma, no firma. PUNTO EXACTO:
+      // al conectar la pasarela, verificar aquí su firma HMAC con el
+      // secreto guardado en `wrangler secret put` antes de actualizar nada.
+      if (request.method === "POST" && path === "/api/webhooks/payment") {
+        const body = await request.json().catch(() => ({}));
+        if (!body.order_id || !body.status) return err(400, "invalid_webhook", "Se requieren order_id y status.");
+        const o = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(body.order_id).first();
+        if (!o) return err(404, "not_found", "Pedido no encontrado.");
+        await db.prepare("UPDATE orders SET payment_status = ? WHERE id = ?").bind(String(body.status), body.order_id).run();
+        await emitWebhook(env, "payment." + String(body.status), { order_id: body.order_id, status: body.status });
+        return json({ ok: true });
+      }
+
+      if (request.method === "POST" && path === "/api/ucp/mcp") {
+        const body = await request.json().catch(() => ({}));
+        return await handleMcp(env, body);
+      }
+
+      if (request.method === "GET" && path === "/.well-known/ucp") return json(CONFIG.ucp_profile);
+      if (request.method === "GET" && path === "/agents.md") return text(CONFIG.agents_md, 200, "text/markdown; charset=utf-8");
+      if (request.method === "GET" && path === "/robots.txt") return text(CONFIG.robots_txt);
+      if (request.method === "GET" && path === "/sitemap.xml") return text(CONFIG.sitemap_xml, 200, "application/xml; charset=utf-8");
+      if (request.method === "GET" && path === "/buy") return Response.redirect("/carrito.html", 302);
+
+      // Archivos estáticos (Workers Static Assets en producción).
+      if (env.ASSETS && request.method === "GET") {
+        const res = await env.ASSETS.fetch(request);
+        if (res.status !== 404) return res;
+      }
+      return err(404, "not_found", "Ruta no encontrada.");
+    } catch (e) {
+      if (e && e.status) return err(e.status, "bad_request", e.message);
+      return err(500, "internal_error", e?.message || "Error interno.");
+    }
+  },
+};
